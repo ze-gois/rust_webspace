@@ -82,6 +82,7 @@ doc = true                     # gera docs
 
 [dependencies]
 ample = { version= "0.1.128" }
+userspace = { version= "0.1.128" }
 
 [build-dependencies]
 cc = "1.0"
