@@ -1,0 +1,263 @@
+## User
+
+hi zed agent, we are going to deal with lowest wasm we can. to the point that we are going to write our own wrappers of wasm microcode. where to beging? documentation and a discussion on how from the wasm request for comment (or analogous deterministic definitions documents) to our own canvas image generation?
+
+## Assistant
+
+Nice — this is a great low-level project. Below I’ll give a compact roadmap, the essential docs and tools, a concrete deterministic ABI for a framebuffer-based Canvas, the tradeoffs between approaches (shared memory vs host calls vs command buffer), low-level implementation notes (including how to wrap/inspect wasm microcode if you really want to go that far), and suggested next steps with options you can pick.
+
+If you want, I can immediately scaffold a minimal prototype in Rust (since your repo is Rust) that: 1) defines the ABI, 2) compiles a tiny .wat test module that writes pixels, and 3) hosts it using a Rust wasm runtime and blits the framebuffer to an HTML canvas or SDL window.
+
+1) Key documentation & tools to read now
+- WebAssembly Core Specification — execution model, value types, instructions (the authoritative definition).
+- WebAssembly Binary Format spec — layout of modules, sections and encoding.
+- WebAssembly Text Format (WAT) docs — write small test modules by hand.
+- Reference interpreter / test suite: the WebAssembly reference interpreter and test suites (helpful for validating semantics).
+- WABT (WebAssembly Binary Toolkit) — wat2wasm / wasm2wat / wasm-objdump (essential developer tools).
+- wasmparser (Rust), wasmi (pure-Rust interpreter), wasmtime (JIT/embedder), wasm3 (small interpreter) — pick one for host work or for parsing instructions.
+- WASI spec — if you want system calls; but for deterministic microcode you will likely avoid WASI or provide a tightly controlled subset.
+- Proposals to be aware of: Bulk Memory Operations, Simd, Reference Types, Threads (they change calling/behavior).
+Search the above by name — they’re the canonical references.
+
+2) High-level design options for Canvas image generation
+You need to decide how wasm and host interact. The three main patterns:
+
+A. Shared framebuffer in linear memory (recommended for performance & determinism)
+- Host exposes a Memory import.
+- Memory layout contains an agreed-upon framebuffer region (byte buffer).
+- Wasm module writes pixels (e.g., RGBA8) directly into memory.
+- Host reads memory and blits to canvas (ImageData.putImageData in JS or memcpy into native framebuffer).
+Pros: few host calls, highest throughput.
+Cons: need clear memory layout and synchronization (double-buffering recommended).
+
+B. Host-call API (lots of imports like put_pixel, draw_rect)
+- Host provides functions imports that the module calls to draw.
+Pros: simpler semantics for module author, host can validate every call.
+Cons: crossing the host boundary per pixel is extremely slow. Use for control operations (clear, present), not per-pixel.
+
+C. Command buffer / Draw list (batched commands in memory)
+- Module writes a sequence of commands/opcodes and operands into a ring buffer in memory.
+- Host parses and executes the command list, applying drawing operations to its framebuffer.
+Pros: fewer host calls, expressive drawing ops, host can optimize (coalesce ops).
+Cons: complexity: you must design command encoding, parsing, and failure handling.
+
+3) Determinism & safety concerns (important)
+- Avoid host-provided nondeterministic features: no clocks, randomness, file IO, threads with nondeterministic scheduling.
+- Fix floating-point behavior explicitly — float operations can differ across implementations. For strict determinism prefer integer arithmetic or define an exact float model and test on target engines.
+- Limit module memory and table sizes and validate modules before instantiation.
+- If you plan to run third-party wasm, validate and sandbox (e.g., limit memory, fuels/stack depth).
+- For repeatability: ensure the execution environment (runtime version) is pinned.
+
+4) Concrete deterministic framebuffer ABI (example spec)
+You can use this as a starting standard for module-host communication.
+
+- Memory: one WebAssembly.Memory import named "env"."memory" (caller decides initial size).
+- Framebuffer metadata region (at a fixed offset, or returned via init):
+  - u32 at FB_META_BASE+0: width (pixels)
+  - u32 at FB_META_BASE+4: height
+  - u32 at FB_META_BASE+8: stride (bytes per row)
+  - u32 at FB_META_BASE+12: fb_offset (start offset in linear memory)
+  - u32 at FB_META_BASE+16: fb_size (bytes)
+  - u32 at FB_META_BASE+20: flags (bitfield; e.g., 0=RGBA8 u8 per channel, origin top-left)
+- Pixel format: RGBA8 (4 bytes per pixel), row-major, origin top-left, no premultiplied alpha by default (define this explicitly).
+- Exports / imports:
+  - import: func env.alloc_fb(width:u32, height:u32) -> fb_offset:u32
+    - host can allocate & return fb_offset; or host can predefine framebuffer
+  - export: func draw(width:u32, height:u32) -> void
+    - module-side draw routine (the host calls this to trigger drawing)
+  - OR export: memory-only module that the host reads from on present; the module may simply write into memory and export a present flag.
+- Synchronization:
+  - Use double-buffering: module writes into buffer A while host reads buffer B; then swap indices.
+  - Provide an atomic u32 at a well-known address for "present" flags (wasm atomic proposal needed for true atomicity, otherwise use host-managed swap on function call).
+
+Example minimal WAT (shared-memory approach)
+(This is a tiny sketch — the module writes a single pixel at (x,y) into fb_offset + (y*stride + x*4) and then returns.)
+
+(module
+  (memory (import "env" "memory") 1)
+  (global $fb_base (mut i32) (i32.const 0)) ;; module can be given the fb base via a set_fb import
+  (func (export "set_fb") (param $base i32) (global.set $fb_base (local.get $base)))
+  (func (export "draw_pixel") (param $x i32) (param $y i32) (param $r i32) (param $g i32) (param $b i32) (param $a i32)
+    (local $ptr i32)
+    (local.set $ptr
+      (i32.add (global.get $fb_base)
+        (i32.mul (i32.add (i32.mul (local.get $y) (i32.const 800)) (local.get $x)) (i32.const 4)))) ;; 800=stride placeholder
+    ;; write r,g,b,a bytes
+    (i32.store8 (local.get $ptr) (local.get $r))
+    (i32.store8 (i32.add (local.get $ptr) (i32.const 1)) (local.get $g))
+    (i32.store8 (i32.add (local.get $ptr) (i32.const 2)) (local.get $b))
+    (i32.store8 (i32.add (local.get $ptr) (i32.const 3)) (local.get $a))
+  )
+)
+
+Host flow for shared-memory:
+- Instantiate module with memory import.
+- Host establishes framebuffer range in memory (or receives allocation info from module).
+- Host calls exported functions (init/draw) or polls flags, then reads memory slice and blits to canvas (ImageData.data in JS) or to an OS window surface.
+
+5) Command buffer format (example)
+If you prefer batching:
+
+Command entry (u32 opcode, followed by operands packed as u32/u16/u8):
+- Opcodes:
+  - 0x01: CLEAR color (u32 rgba)
+  - 0x02: FILL_RECT x y w h color
+  - 0x03: COPY_SRC src_offset dest_offset size
+  - 0x04: DRAW_SUBIMAGE src_offset sx sy sw sh dx dy
+- The module writes commands sequentially into a ring buffer; a write pointer and read pointer are kept in memory or supplied by host. Host parses and executes on present or frame boundary.
+
+6) If you want to work at the wasm-opcode / microcode level
+You said “write our own wrappers of wasm microcode” — this can mean two things:
+
+A. Wrappers around the low-level wasm instruction set for simpler host APIs
+- Use wasmparser (Rust) or WABT to disassemble and inspect opcodes.
+- Wrap by generating tiny helper functions or macros in WAT that perform common low-level tasks (e.g., memaddr computations, unrolled loops).
+- This approach is mostly about authoring modules in WAT or emitting wasm binary directly.
+
+B. Implementing your own wasm interpreter / JIT or a microcode layer that converts wasm instructions to your own micro-ops
+- Use wasmparser to parse the binary and walk functions’ opcodes.
+- Translate wasm instructions to your micro-op format (e.g., a small VM ISA) for your engine or to emit native operations.
+- This is large work: you must implement validation (the wasm validation rules), stack machine semantics (operand stack), locals/globals, memory/tables, function calls, control-flow constructs, and host calls. If you take this path, read the WebAssembly spec’s formal semantics carefully and study reference implementations (wasmi for an interpreter, wasmtime for JIT).
+- For deterministic image generation you can also implement a tiny interpreter limited to a predictable subset (no floating point, no threads, no non-deterministic host calls). This reduces scope drastically.
+
+7) Performance & implementation tips
+- Prefer memory writes over per-pixel host calls.
+- Use typed bulk operations when possible: wasm memory.fill, memory.copy (Bulk Memory proposal) — faster for large fills/copies.
+- Pack color as u32 and store via aligned stores where possible to reduce per-byte operations.
+- If you use SIMD (if supported and deterministic), you can accelerate blits inside wasm.
+- Use double buffering (module writes to back buffer, host swaps on present).
+- Avoid runtime allocations in module where host can provide buffers.
+
+8) Example host strategies by environment
+- JavaScript/Browser: instantiate wasm, expose memory, read Uint8ClampedArray from memory and set ImageData.data then ctx.putImageData. Use requestAnimationFrame for presenting. This is easiest for canvas.
+- Native (Rust): use wasmtime or wasmi to run modules, map memory, then copy memory to a window surface (SDL2, wgpu, sdl2::surface, glium).
+- Embedded/Specialized: embed a minimal interpreter (wasm3) and write direct framebuffer outputs.
+
+9) Next steps I recommend (pick one)
+- A: I’ll scaffold a minimal Rust host + WAT module using shared-memory framebuffer (fastest proof). Host will use wasmi or wasmtime to instantiate and copy the framebuffer into an SDL2 window or produce a PNG.
+- B: Define and standardize your ABI/command buffer formally (I can produce a spec file you can version).
+- C: If you actually want to implement a tiny wasm interpreter/microcode translator limited to a deterministic subset, I can draft the interpreter design and start a minimal prototype (parse functions, implement stack + memory + call frames + a few instructions).
+
+Which of these do you want me to do next?
+- Scaffold Rust host + wasm module prototype (shared-memory and command-buffer versions)?
+- Produce a formal ABI/command-buffer spec document you can use as a standard?
+- Start a tiny deterministic wasm interpreter (micro-op) prototype?
+
+Also: do you prefer browser canvas targets (ImageData) or a native framebuffer (SDL2/wgpu)? That determines the host blit code I should write.
+
+## User
+
+that far or that close.
+
+## Assistant
+
+Got it — terse and ready. Quick clarifying questions so I can start the right work:
+
+1) Which of these do you want me to do now?
+   - A: Scaffold a minimal prototype (Rust host + tiny wasm module) that uses a shared-memory framebuffer and presents to a canvas/window.
+   - B: Produce a formal ABI / deterministic command-buffer spec document you can version.
+   - C: Start a tiny deterministic wasm interpreter / micro-op prototype (limited instruction subset).
+
+2) Target environment for the host:
+   - Browser (wasm module + JS host -> HTML Canvas)
+   - Native (Rust host running the module -> SDL2 or wgpu window)
+   - Both / don’t care (I’ll pick the fastest to demo)
+
+3) Preferences / constraints:
+   - Prefer runtime: wasmtime (JIT/embedder), wasmi (pure-Rust interpreter), or wasm3?
+   - Determinism limits: allow floats/simd/threads, or strictly integer-only?
+
+Tell me the choice for (1) and answers for (2)-(3). I’ll then either:
+- scaffold the prototype and list changed files, or
+- write the ABI spec, or
+- draft the interpreter design and a minimal implementation.
+
+Which one?
+
+## User
+
+let's begin with urls that I should at least skim
+
+## Assistant
+
+Good — here’s a compact, prioritized reading list (URLs + one-line why) so you can skim just what’s essential, then dig deeper where you want.
+
+Core specification and text/binary formats (read first)
+- WebAssembly Core Specification — execution model, types, control flow, validation, semantics  
+  https://webassembly.github.io/spec/core/
+- WebAssembly text format (WAT) reference (part of the spec) — how to author tiny modules by hand  
+  https://webassembly.github.io/spec/core/text/index.html
+- WebAssembly Binary Format (how modules are encoded)  
+  https://webassembly.github.io/spec/core/binary/index.html
+
+Tooling & developer kits (must-scan)
+- WABT (wat2wasm, wasm-objdump, wasm2wat) — disassemble/assemble wasm  
+  https://github.com/WebAssembly/wabt
+- Binaryen / wasm-opt — optimizer, emitter and convenience tools for generating/transforming wasm  
+  https://github.com/WebAssembly/binaryen
+- wasm-tools (Bytecode Alliance) — collection of tools & crates (wasmparser, wasm-smith, etc.)  
+  https://github.com/bytecodealliance/wasm-tools
+
+Runtimes / host embedding (pick one to prototype)
+- Wasmtime (fast JIT/AOT runtime, good Rust embedding docs) — great for native hosts  
+  https://wasmtime.dev/  ·  https://docs.wasmtime.dev/
+- wasmi (pure-Rust interpreter) — tiny and deterministic-friendly for prototyping an interpreter  
+  https://github.com/paritytech/wasmi
+- wasm3 (very small C interpreter, useful for embedded)  
+  https://github.com/wasm3/wasm3
+- wasm-micro-runtime (WAMR — embedded runtime)  
+  https://github.com/bytecodealliance/wasm-micro-runtime
+
+Parsing / inspection libraries (for “microcode” work)
+- wasmparser (Rust crate) — fast binary wasm parser for reading instructions/opcodes  
+  https://docs.rs/wasmparser/latest/wasmparser/  ·  repo: https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmparser
+- wasm-objdump / wasm2wat (from WABT) — decode binaries to WAT for manual inspection  
+  https://github.com/WebAssembly/wabt
+
+WASI, determinism & host API design
+- WASI (WebAssembly System Interface) — standardized system calls (but you may avoid most of it for determinism)  
+  https://wasi.dev/  ·  https://github.com/WebAssembly/WASI
+- Atomic / Threads / Shared Memory background (important if using shared buffers)  
+  https://github.com/WebAssembly/threads
+- Bulk Memory and Memory Ops (memory.copy / memory.fill) — essential for fast framebuffer ops  
+  https://github.com/WebAssembly/bulk-memory-operations
+- SIMD proposal (if you plan to use wasm SIMD for blits)  
+  https://github.com/WebAssembly/simd
+
+Browser/Canvas integration & examples (if targeting HTML Canvas)
+- MDN: WebAssembly overview (good conceptual intro)  
+  https://developer.mozilla.org/en-US/docs/WebAssembly
+- MDN: Pixel manipulation with Canvas / putImageData / ImageData (how to blit wasm linear memory to canvas)  
+  https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API/Tutorial/Pixel_manipulation_with_canvas  
+  https://developer.mozilla.org/en-US/docs/Web/API/ImageData
+- wasm-bindgen / rust-wasm book (if you use Rust → wasm + browser glue)  
+  https://rustwasm.github.io/book/
+
+Tutorials, sandboxes & examples (fast hands-on)
+- WebAssembly Studio — quick online prototyping (WAT / Rust → wasm)  
+  https://webassembly.studio/
+- Wasm By Example — focused, short examples of common wasm idioms  
+  https://wasmbyexample.dev/
+
+Testing, validation and reference suites
+- WebAssembly spec repository / tests (for validation semantics & tests)  
+  https://github.com/WebAssembly/spec
+- wabt tests / examples are bundled with WABT repo (useful reference)
+
+Low-level / research / determinism reading
+- “Writing a WebAssembly interpreter” style posts and wasm internals — search the wasmtime/wasmi authors’ blogs and the Bytecode Alliance blog for deep dives. (Start with wasmtime internals & wasmi README for architecture.)
+  - Wasmtime internals overview: https://bytecodealliance.org/articles/wasmtime.html
+  - wasmi README & design notes: https://github.com/paritytech/wasmi
+
+Practical next-step reading order I recommend
+1. Skim the Core Spec text and WAT reference (get the execution model).  
+2. Read the WABT README and try wat2wasm/wasm-objdump on a tiny module.  
+3. Pick a runtime (wasmtime for native, wasmi or wasm3 if you want simpler interpreter-style behavior) and read its embedding docs.  
+4. Read MDN’s Canvas putImageData + rust-wasm book (if targeting browser).  
+5. Skim wasmparser + wasm-tools if you plan to inspect/translate opcodes or write your own micro-op layer.
+
+If you want, I can:
+- Fetch and show one-line highlights or code snippets from any of the above (e.g., how to map WebAssembly.Memory to an ImageData buffer in JS).  
+- Immediately scaffold a minimal prototype in this repo: choose runtime (wasmtime/wasmi/wasm3) and target (browser/native) and I’ll create the minimal host + a tiny WAT module that writes into a framebuffer.
+
+Which of those follow-ups do you want next?
