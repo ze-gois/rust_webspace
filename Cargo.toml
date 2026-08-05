@@ -70,22 +70,34 @@ bench = false
 required-features = []        # nenhuma feature obrigatória
 doc = true                     # gera docs
 
-[[bin]]
-name = "webspace"
-path = "src/entry.rs"
-# crate-type = ["bin"]
-test = false
-doctest = true
-bench = false
-required-features = []        # nenhuma feature obrigatória
-doc = true                     # gera docs
-
 [dependencies]
+wasm-bindgen = "0.2"
 ample = { path = "../ample", version= "0.1.128" }
+humans = { path = "../humans", version= "0.0.1" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = [
+    "AudioBuffer",
+    "AudioBufferSourceNode",
+    "AudioContext",
+    "AudioDestinationNode",
+    "AudioNode",
+    "AudioScheduledSourceNode",
+    "CanvasGradient",
+    "CanvasRenderingContext2d",
+    "Document",
+    "DomRect",
+    "Element",
+    "EventTarget",
+    "HtmlButtonElement",
+    "HtmlCanvasElement",
+    "HtmlInputElement",
+    "MouseEvent",
+    "Window",
+] }
 
 [build-dependencies]
 cc = "1.0"
-userspace_build = { path = "../userspace_build", version = "0.1.128" }
 
 [features]
 default = ["no_std"]
