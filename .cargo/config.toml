@@ -1,8 +1,8 @@
 [build]
-target = "x86_64-unknown-none"
+target = "wasm32-unknown-unknown"
 
 [unstable]
-build-std = ["core", "alloc"]
+build-std = ["core", "alloc", "std"]
 
 [target.x86_64-unknown-none]
 rustflags = [

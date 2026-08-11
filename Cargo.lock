@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ample"
-version = "0.1.129"
+version = "0.2.0"
 dependencies = [
  "cc",
 ]
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "humans"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "ample",
  "cc",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "webspace"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "ample",
  "cc",
