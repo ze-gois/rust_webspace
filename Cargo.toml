@@ -1,13 +1,13 @@
 [package]
 name = "webspace"
-version = "0.0.1"
+version = "0.2.0"
 edition = "2024"
 authors = ["José Gois <ze.gois.00@gmail.com>"]
 description = "wasm utilities"
-documentation = "https://docs.rs/bitflags"
+documentation = "https://userspace.zegois.com/webspace/doc"
 repository = "https://github.com/ze-gois/rust_webspace"
 readme = "README.md"
-homepage = "https://userspace.builders"
+homepage = "https://userspace.zegois.com/webspace"
 license-file = "LICENSE"
 keywords = ["web", "wasm", "webpage", "saas", "application"]
 categories = ["wasm", "web-programming"]
@@ -72,8 +72,8 @@ doc = true                     # gera docs
 
 [dependencies]
 wasm-bindgen = "0.2"
-ample = { path = "../ample", version= "0.1.128" }
-humans = { path = "../humans", version= "0.0.1" }
+ample = { path = "../ample", version= "0.2.0" }
+humans = { path = "../humans", version= "0.2.0" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = [
