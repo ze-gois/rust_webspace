@@ -1,0 +1,49 @@
+name: Targets
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  targets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout webspace
+        uses: actions/checkout@v4
+
+      - name: Checkout ample
+        uses: actions/checkout@v4
+        with:
+          repository: ze-gois/rust_ample
+          ref: main
+          path: _ample
+
+      - name: Checkout humans
+        uses: actions/checkout@v4
+        with:
+          repository: ze-gois/rust_humans
+          ref: main
+          path: _humans
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Configure local internal crates
+        run: |
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          ample = { path = "_ample" }
+          humans = { path = "_humans" }
+          EOF
+
+      - name: Check bare-metal boundary
+        run: cargo check --lib --target x86_64-unknown-none -Z build-std=core,alloc
+
+      - name: Check wasm boundary
+        run: cargo check --lib --target wasm32-unknown-unknown -Z build-std=core,alloc,std

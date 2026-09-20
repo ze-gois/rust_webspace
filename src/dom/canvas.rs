@@ -4,6 +4,7 @@
 //! offsets into pitch classes, display names, note ranges, and active playback
 //! indices.
 
+use alloc::format;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, window};
 

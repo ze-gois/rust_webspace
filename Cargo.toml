@@ -71,11 +71,11 @@ required-features = []        # nenhuma feature obrigatória
 doc = true                     # gera docs
 
 [dependencies]
-wasm-bindgen = "0.2"
 ample = { version= "0.2.0" }
 humans = { version= "0.2.0" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = [
     "AudioBuffer",
     "AudioBufferSourceNode",
@@ -97,7 +97,6 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [build-dependencies]
-cc = "1.0"
 
 [features]
 default = ["no_std"]
