@@ -6,6 +6,7 @@
 
 pub mod canvas;
 
+use alloc::format;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::Document;
 
